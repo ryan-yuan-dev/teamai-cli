@@ -596,7 +596,7 @@ knowledge on main is left exactly in place).
    - `.teamai/env/env.yaml` — shared env vars
 
    `teamai push` scans all of these plus your AI tool dirs, and only surfaces genuine additions or edits (already-committed content is skipped). A rule or skill under `.teamai/` that matches an older version of the team's file, as it does when your branch is behind the default branch, is not an edit either: push skips it with a warning rather than revert a teammate's update. If you rename an agent's extension (e.g. `helper.md` → `helper.yaml`), delete the old file — `teamai push` won't remove it for you, and two files with the same stem would collide on pull.
-4. **docs / hooks / mcp** are contributed by editing their file directly — they don't go through `teamai push`; a normal `git commit` + push ships them:
+4. **docs / hooks / mcp** are contributed by editing their file directly — they don't go through the scanning part of `teamai push`; a normal `git commit` + push ships them (`teamai push --docs` is refused here, since its PR would be to this same repo):
    - `.teamai/docs/` — team docs
    - `.teamai/hooks/hooks.yaml` — team hooks
    - `.teamai/mcp/mcp.yaml` — shared MCP servers
@@ -859,7 +859,21 @@ teamai push          # Scan for new/modified resources, create an MR
 teamai push --all    # Skip confirmation, push directly
 teamai push --role pm  # Push into the pm namespace (skills/pm/, rules/pm/, agents/pm/)
 teamai push --branch feature/gitee-destination  # Use an explicit destination branch
+teamai push --docs docs/tutk        # Publish docs/tutk/** from the tutk directory
+teamai push --docs api/notes.md     # Publish docs/notes.md
+teamai push --docs docs/tutk --namespace guides  # Publish into docs/guides/** instead
 ```
+
+**Publishing docs.** `--docs <path>` copies one local directory or file into the team repo's `docs/` tree and opens a PR for it, so the same `teamai pull` that delivers every other document delivers this one. Nothing scans for docs, so the source is named on the command line:
+
+- The path is resolved against the current directory (a `~/`-prefixed one against `$HOME`), and may be a directory or a file.
+- A directory publishes its contents into a top-level directory named by its own last segment: `--docs docs/tutk` puts tutk's files in `docs/tutk/`, never `docs/tutk/tutk/`. A file keeps its name: `--docs api/notes.md` publishes `docs/notes.md`.
+- `--namespace <ns>` publishes into `docs/<ns>/` instead of the source's own name, for a team that files docs under a role's or project's namespace: `--docs docs/tutk --namespace guides` puts the files in `docs/guides/`. `docs/team-codebase/` is rejected, as it is in the manifests.
+- Nothing is read from the team manifest: the path decides the destination, so a push needs no `resources.docs` declaration and does not depend on which namespaces are active for the directory.
+- A directory replaces its destination, so files the source no longer has are removed from the team's copy; a file overwrites the one at its destination. Either way the change is a diff in the PR, which is where it gets reviewed.
+- An open PR for the same source name and destination is updated in place. Pushing the same name to a different namespace opens a separate PR and says so, leaving the first review untouched.
+- Single-repo mode (`teamai init --self`) is refused: that mode's team docs live in `.teamai/docs/` inside the business repo, where a normal `git commit` + push ships them.
+- `--docs` cannot be combined with `--skill` or `--all`, and `--dry-run` prints the destination without writing anything.
 
 `--branch` names the branch that receives a new push; an existing open PR is always updated on its recorded branch. TeamAI refuses to start a push when the team-repo clone has user changes (modified, staged, untracked, or conflicted files); TeamAI-owned `teamai.yaml`, the env files `teamai env add` edited, and sync-lock state are handled separately. Commit or stash other local changes first.
 
@@ -1260,7 +1274,7 @@ Only two literal line shapes count as a real reference, though: a bare `source X
 
 ### Docs
 
-Place documentation in the team repo's `docs/` directory; after pushing, team members will automatically receive it on their next `pull`.
+Place documentation in the team repo's `docs/` directory; after pushing, team members will automatically receive it on their next `pull`. A standalone team repo can take a document from your working directory with `teamai push --docs <dir-or-file>`, which opens a PR for `docs/<name>/` (a directory's contents) or `docs/<name>` (a file) — see [Publishing docs](#push-local-resources).
 
 **Docs by namespace.** A top-level `docs/<ns>/` becomes a namespace once any role or project lists it under `resources.docs`. From then on it reaches only the members who have it active (their roles' and their directory's projects' namespaces); everyone else stops receiving it. A `docs/<dir>/` that no role or project lists stays shared, so existing subdirectories keep reaching everyone:
 

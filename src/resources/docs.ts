@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import fse from 'fs-extra';
 import { ResourceHandler } from './base.js';
 import { resolveBaseDir, type ResourceItem, type TeamaiConfig, type LocalConfig } from '../types.js';
-import { expandHome, listDirs, pruneEmptyDirs } from '../utils/fs.js';
+import { copyDir, copyFile, expandHome, listDirs, listFilesRecursive, pruneEmptyDirs, remove } from '../utils/fs.js';
+import { assertWithinRoot } from '../utils/path-safety.js';
 import { log } from '../utils/logger.js';
 import { caseFoldKey } from '../manifest-schema.js';
 import { resolveResourceNamespaces } from '../resource-namespaces.js';
@@ -257,7 +258,9 @@ export class DocsHandler extends ResourceHandler {
   readonly type = 'docs' as const;
 
   async scanLocalForPush(_teamConfig: TeamaiConfig, _localConfig: LocalConfig): Promise<ResourceItem[]> {
-    // Docs are managed directly in team repo
+    // Nothing scans for docs: they are named on the command line
+    // (`teamai push --docs --dir/--file`, src/push.ts), which builds its own
+    // item and calls `pushItem` below.
     return [];
   }
 
@@ -278,8 +281,37 @@ export class DocsHandler extends ResourceHandler {
     return (await listDocFiles(sourcePath)).length;
   }
 
-  async pushItem(_item: ResourceItem, _teamConfig: TeamaiConfig, _localConfig: LocalConfig): Promise<void> {
-    // No-op
+  async pushItem(item: ResourceItem, _teamConfig: TeamaiConfig, localConfig: LocalConfig): Promise<void> {
+    // `teamai push --docs` is the only caller: nothing scans for docs, the user
+    // names a directory or file on the command line. `relativePath` is
+    // `docs/<dir>/` for a directory and `docs/<name>` for a file, so the guard
+    // is the whole docs root — both path components are safe segments before
+    // this is reached (src/push.ts).
+    const docsRoot = path.join(localConfig.repo.localPath, 'docs');
+    const dest = path.resolve(localConfig.repo.localPath, item.relativePath);
+    assertWithinRoot(
+      docsRoot,
+      dest,
+      `Invalid docs destination outside team repo docs directory: ${item.relativePath}`,
+    );
+    const stats = await fs.stat(item.sourcePath);
+    if (stats.isDirectory()) {
+      // Same overwrite rule as a skill: the source subtree replaces the
+      // destination's, and files the source no longer carries are removed so a
+      // renamed or deleted document does not linger in the team's copy. Hidden
+      // entries are skipped on both sides, as the docs mirror skips them on pull.
+      await copyDir(item.sourcePath, dest);
+      const sourceFiles = new Set(await listFilesRecursive(item.sourcePath));
+      const teamFiles = await listFilesRecursive(dest);
+      for (const relativePath of teamFiles) {
+        if (sourceFiles.has(relativePath)) continue;
+        await remove(path.join(dest, relativePath));
+      }
+      await pruneEmptyDirs(dest);
+    } else {
+      await copyFile(item.sourcePath, dest);
+    }
+    log.debug(`Copied docs ${item.sourcePath} → ${item.relativePath}`);
   }
 
   /**

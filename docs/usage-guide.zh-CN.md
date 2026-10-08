@@ -503,7 +503,7 @@ main 的团队知识 —— `git status` 保持干净。旧版单仓装升级后
    - `.teamai/env/env.yaml` —— 共享环境变量
 
    `teamai push` 会同时扫描这些目录和你的 AI 工具目录，只呈现真正的新增或修改（已提交的内容会被跳过）。`.teamai/` 下的规则或 skill 如果与团队文件的某个旧版本一致（你的分支落后于默认分支时就会这样），也不算修改：push 会给出警告并跳过它，而不会覆盖队友的更新。如果你改了某个 agent 的扩展名（如 `helper.md` → `helper.yaml`），请手动删掉旧文件 —— `teamai push` 不会替你删除，同 stem 的两个文件会在 pull 时冲突。
-4. **docs / hooks / mcp** 通过直接编辑对应文件来贡献 —— 它们不走 `teamai push`，用普通的 `git commit` + push 即可分发：
+4. **docs / hooks / mcp** 通过直接编辑对应文件来贡献 —— 它们不走 `teamai push` 的扫描部分；用普通的 `git commit` + push 即可分发（`teamai push --docs` 在这里会被拒绝，因为它的 PR 会开向同一个仓库）：
    - `.teamai/docs/` —— 团队文档
    - `.teamai/hooks/hooks.yaml` —— 团队 hooks
    - `.teamai/mcp/mcp.yaml` —— 共享 MCP servers
@@ -760,7 +760,21 @@ teamai push          # 扫描新增/修改的资源，创建 MR
 teamai push --all    # 跳过确认，直接推送
 teamai push --role pm  # 推送到 pm namespace（skills/pm/、rules/pm/、agents/pm/）
 teamai push --branch feature/gitee-destination  # 使用显式目标分支
+teamai push --docs docs/tutk        # 把 tutk 目录发布到 docs/tutk/**
+teamai push --docs api/notes.md     # 发布 docs/notes.md
+teamai push --docs docs/tutk --namespace guides  # 改发布到 docs/guides/**
 ```
+
+**发布文档。** `--docs <path>` 把一个本地目录或文件复制进团队仓库的 `docs/` 树并为其开 PR，因此投递其他文档的那个 `teamai pull` 也会投递它。没有任何扫描会发现 docs，所以来源在命令行上指定：
+
+- 路径相对当前工作目录解析（`~/` 开头的相对 `$HOME` 解析），可以是目录也可以是文件。
+- 目录会把其内容发布到以自身最后一段命名的顶层目录：`--docs docs/tutk` 把 tutk 下的文件放进 `docs/tutk/`，绝不会是 `docs/tutk/tutk/`。文件保留自己的名字：`--docs api/notes.md` 发布 `docs/notes.md`。
+- `--namespace <ns>` 改为发布到 `docs/<ns>/`，用于团队按 role 或 project 的命名空间归档文档的场景：`--docs docs/tutk --namespace guides` 把文件放进 `docs/guides/`。`docs/team-codebase/` 会被拒绝，与 manifest 中的规则一致。
+- 不从团队 manifest 读取任何信息：目标完全由路径决定，因此不需要声明 `resources.docs`，也不依赖该目录下哪些 namespace 处于活跃状态。
+- 目录会替换其目标位置，因此来源中已不存在的文件会从团队副本中删除；文件会覆盖其目标位置的文件。两种情况在 PR 中都体现为 diff，评审就在这里进行。
+- 同名同目标已存在开放 PR 时就地更新。把同名内容推到另一个 namespace 会另开 PR 并给出提示，不动原来那个评审。
+- 单仓模式（`teamai init --self`）会被拒绝：该模式下团队文档位于业务仓库内的 `.teamai/docs/`，用普通 `git commit` + push 分发即可。
+- `--docs` 不能与 `--skill` 或 `--all` 组合；`--dry-run` 只打印目标位置，不写任何内容。
 
 `--branch` 指定新推送使用的分支；已有开放 PR 始终沿用其记录的分支进行更新。如果团队仓库 clone 存在用户修改、暂存、未跟踪或冲突文件，TeamAI 会在 push 前拒绝执行；TeamAI 自己管理的 `teamai.yaml`、`teamai env add` 修改的 env 文件和 sync-lock 状态会单独处理。其他本地改动请先提交或 stash。
 
@@ -1117,7 +1131,7 @@ shell 配置文件会保留用户级 scope 的 teamai 区块，外加一个项�
 
 ### Docs（文档）
 
-将文档放入团队仓库 `docs/` 目录，push 后团队成员 pull 时自动同步。
+将文档放入团队仓库 `docs/` 目录，push 后团队成员 pull 时自动同步。独立团队仓库下，也可以用 `teamai push --docs <dir-or-file>` 从工作目录发布文档，它会为 `docs/<name>/`（目录的内容）或 `docs/<name>`（文件）开一个 PR —— 见 [推送本地资源](#推送本地资源)。
 
 **按 namespace 分发 docs。** 只要有任一角色或项目在 `resources.docs` 中列出某个顶层 `docs/<ns>/`，它就成为一个 namespace，此后只分发给激活了它的成员（其角色与所在目录项目的 namespace 并集），其他人不再收到。没有任何角色或项目列出的 `docs/<dir>/` 仍然共享，因此已有的子目录继续分发给所有人：
 

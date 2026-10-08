@@ -397,6 +397,22 @@ and indexed for everyone. The search index reaches the legacy codebase docs
 only through the docs walk, so withholding `docs/team-codebase/` in a later
 change would silently drop them from recall.
 
+A standalone team repo also accepts documents from a member's working directory:
+`teamai push --docs <dir-or-file>` copies the named directory or file onto a
+push branch and opens its PR through the same provider path as any other
+resource. The destination follows the path, not the manifest: a directory
+publishes its contents into a top-level directory named by its own last segment
+(`--docs docs/tutk` → `docs/tutk/`), a file keeps its name (`--docs api/n.md` →
+`docs/n.md`), and `--namespace <ns>` replaces that directory with `docs/<ns>/`.
+Because the path decides, the push reads no `resources.docs` declaration and does
+not depend on which namespaces are active for the directory, so it works in a
+team that has never namespaced its docs. The segment is validated as a path
+component, the reservation above applies to a named namespace, and a directory
+replaces its destination so files the source dropped do not linger. Single-repo
+mode refuses the flag: its team docs live in `.teamai/docs/` inside the business
+repo, which a normal commit already ships. Nothing else changes for delivery —
+`pull`, `recall` and `doctor` read the resulting `docs/` tree exactly as before.
+
 ### Models
 
 Team profiles come from `models/models.yaml` plus `models/<ns>/models.yaml` for

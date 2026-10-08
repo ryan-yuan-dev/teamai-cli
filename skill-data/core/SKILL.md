@@ -120,6 +120,12 @@ generated reference below. Read it instead of guessing a flag.
 removing stale and local-only documents; an edited doc of a docs namespace you left
 is kept and named. Use a dedicated directory; preview with `--dry-run`.
 
+To publish a document from your working directory into a standalone team repo's
+`docs/`, use `teamai push --docs <dir-or-file>`; a directory's contents land in
+`docs/<directory-name>/` and a file in `docs/<file-name>`, and `--namespace <ns>`
+puts them under `docs/<ns>/` instead. `teamai push --help` has the details.
+Editing the team repo's `docs/` directly still works.
+
 `teamai pull` keeps a skill, rule or agent copy the user changed since teamai
 delivered it, `--force` included, and names it (`Kept <path>: ...`). To share
 the change, `teamai push`; when pull says the version teamai would deploy has

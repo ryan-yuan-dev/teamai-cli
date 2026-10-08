@@ -22,6 +22,13 @@ thing now.
   for it. (Step A below is only a manual fallback for while recall is off.)
 - **A reusable skill** (a `SKILL.md` others invoke) → author the skill, then
   `teamai push` (Step B — the main purpose of this reference).
+- **A document** (a design note, a runbook, reference material) → either edit the
+  team repo's `docs/` directly, or publish a directory or file from the working
+  directory with `teamai push --docs <dir-or-file>`. The path decides where it
+  lands — a directory's contents in `docs/<directory-name>/`, a file in
+  `docs/<file-name>` — and `--namespace <ns>` puts them under `docs/<ns>/`
+  instead; `teamai push --help` has the details. The rest of Step B's
+  confirmation rules apply unchanged.
 
 ## Step A — Contribute a learning by hand (fallback only)
 

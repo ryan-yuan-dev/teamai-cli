@@ -36,7 +36,9 @@ Generated: do not edit by hand. Regenerate with
 - `teamai push` — Push local resources to team repo
   - `--all` — Push all without confirmation
   - `--skill <path>` — Push a specific skill by path (e.g., ~/.claude/skills/hai/my-skill or skills/hai_dev/my-skill)
-  - `--role <id>` — Namespace for new skills, rules and agents (skills/<id>/, rules/<id>/, agents/<id>/)
+  - `--docs <path>` — Publish a local directory or file into the team repo docs/ tree, resolved against the current directory
+  - `--namespace <ns>` — With --docs: the top-level docs directory to publish under (docs/<ns>/), instead of the source's own name
+  - `--role <id>` — Namespace for new skills, rules and agents (skills/<id>/, rules/<id>/, agents/<id/>)
   - `--project <id>` — Target a project: each new resource goes to that project's namespace for its own type — skills, knowledge for rules, agents (from manifest/projects.yaml)
   - `--branch <name>` — Push to this destination branch instead of a generated teamai/push branch
 

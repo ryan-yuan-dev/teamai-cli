@@ -6,6 +6,7 @@ import { assertNotReadOnly } from './read-only.js';
 import {
   createGit, pullRepo, pushRepoBranch, checkoutMaster, generateBranchName,
   resetToCleanMaster, isDedicatedRepoRoot, getDefaultBranch, getFileContentAtRev, getHeadCommit,
+  remoteBranchExists,
 } from './utils/git.js';
 import { reconcilePlacementRecords,
   findPendingForItem, partiallySelectedEntries, pendingNamespaceFor, planPushGroups,
@@ -19,21 +20,43 @@ import { scanTeamRepoNamespaces } from './resources/skills.js';
 import { AgentsHandler } from './resources/agents.js';
 import { deliversEveryNamespace } from './resource-namespaces.js';
 import type {
-  GlobalOptions, ResourceItem, ResourceType, LocalConfig, TeamaiConfig, State,
+  GlobalOptions, ResourceItem, ResourceType, LocalConfig, PendingPush, TeamaiConfig, State,
 } from './types.js';
 import { getDataHome, SELF_KNOWLEDGE_SCAN_KEY, SYNC_LOCK_FILENAME } from './types.js';
 import { acquireLock, releaseLock } from './update.js';
 import { assertSafeResourceName } from './utils/path-safety.js';
 import { loadRolesManifest, resolveRoleResourceNamespaces, RolesManifestNotFoundError } from './roles.js';
 import type { ProjectsManifest } from './projects.js';
-import { isSafeNamespaceSegment, NAMESPACE_RULE, fallbackNamespaceError } from './manifest-schema.js';
+import {
+  caseFoldKey, isSafeNamespaceSegment, NAMESPACE_RULE, RESERVED_DOCS_DIR, fallbackNamespaceError,
+} from './manifest-schema.js';
 import {
   isAtSharedRoot, isPlaceableType, NAMESPACE_AXIS, PLACEABLE_TYPES, placedResourcePath,
   resolveProjectNamespace, skillNamespacePath, withNamespace, type PlaceableType,
 } from './push-namespaces.js';
 import { askQuestion, askSelection, isInteractive } from './utils/prompt.js';
-import { pathExists, pruneEmptyDirs, readFileSafe, writeFile } from './utils/fs.js';
+import {
+  expandHome, listFilesRecursive, pathExists, pruneEmptyDirs, readFileSafe, writeFile,
+} from './utils/fs.js';
 import { brokenTeamProfileFiles } from './models/profile.js';
+
+/**
+ * Everything `teamai push` accepts from the command line. `--docs <path>` is
+ * its own mode: it publishes a local directory or file into the team repo's
+ * `docs/` tree, the one resource type no scanner discovers
+ * (`DocsHandler.scanLocalForPush` returns nothing by design).
+ */
+export type PushOptions = GlobalOptions & {
+  all?: boolean;
+  skill?: string;
+  role?: string;
+  project?: string;
+  branch?: string;
+  /** `--docs <path>`: a local directory or file to publish into the team repo's docs/ tree. */
+  docs?: string;
+  /** Top-level docs directory to publish under, instead of the source's name. */
+  namespace?: string;
+};
 
 /**
  * Filter a list of repo-root-relative paths (e.g. "rules/", ".codebuddy-plugin/") down to
@@ -785,7 +808,7 @@ async function pushGroup(args: {
 }
 
 export async function push(
-  options: GlobalOptions & { all?: boolean; role?: string; project?: string; branch?: string },
+  options: PushOptions,
   /**
    * Optional out-param: set to `{ completed: true }` only when a real push
    * actually happened (resources or config pushed) — never on dry-run, cancel,
@@ -794,6 +817,14 @@ export async function push(
    */
   result?: { completed: boolean },
 ): Promise<void> {
+  // `--docs <path>` publishes a local directory or file into the team repo's
+  // docs/ tree. It shares this command's clone refresh, branch/PR and rollback,
+  // but not its scan: nothing discovers docs, they are named on the command line.
+  if (options.docs !== undefined) {
+    await pushDocs(options.docs, options, result);
+    return;
+  }
+
   // Auto-detect scope: project scope if cwd has project config, else user scope.
   // An unreadable project config stops here instead of selecting another team.
   const { localConfig, teamConfig } = await autoDetectInit(undefined, { dryRun: options.dryRun });
@@ -938,7 +969,7 @@ async function pendingSelfTeamConfig(localConfig: LocalConfig): Promise<string |
 async function pushCore(
   localConfig: LocalConfig,
   teamConfig: TeamaiConfig,
-  options: GlobalOptions & { all?: boolean; role?: string; project?: string; branch?: string },
+  options: PushOptions,
   initialPendingTeamConfig: string | null = null,
   result?: { completed: boolean },
 ): Promise<void> {
@@ -1943,5 +1974,270 @@ async function pushTeamConfigOnly(
     }
     process.exitCode = 1;
     return;
+  }
+}
+
+/** A `--docs` source: one file, or a directory whose subtree publishes into the team repo. */
+type DocsSource = {
+  kind: 'dir' | 'file';
+  sourcePath: string;
+  /** The source's own last path segment: the published directory or filename. */
+  segment: string;
+  /** `--namespace`, which names the top-level directory instead of `segment`. */
+  namespace: string | null;
+};
+
+/**
+ * Validate `--docs <path>` and describe what it publishes. The path resolves
+ * against the current directory; the last segment — the only piece of the
+ * user's input that becomes a path component — must be a safe one.
+ */
+async function resolveDocsSource(
+  input: string,
+  options: PushOptions,
+): Promise<{ ok: true; source: DocsSource } | { ok: false; message: string }> {
+  // `--docs` is a valued option, so the shell always hands over a string; an
+  // empty one would resolve to the current directory and publish all of it.
+  if (input.trim() === '') {
+    return { ok: false, message: 'teamai push --docs needs a path: --docs <dir-or-file>.' };
+  }
+  const sourcePath = path.resolve(expandHome(input));
+  let stats;
+  try {
+    stats = await stat(sourcePath);
+  } catch {
+    return { ok: false, message: `No such file or directory: ${input}` };
+  }
+  // `path.basename` on the resolved path: a trailing separator would otherwise
+  // name the parent instead.
+  const segment = path.basename(sourcePath);
+  try {
+    assertSafeResourceName(segment);
+  } catch (e) {
+    return { ok: false, message: `Cannot publish "${input}": ${(e as Error).message}` };
+  }
+  let namespace: string | null = null;
+  if (options.namespace !== undefined) {
+    try {
+      assertSafeResourceName(options.namespace);
+    } catch (e) {
+      return { ok: false, message: `Invalid --namespace value "${options.namespace}": ${(e as Error).message}` };
+    }
+    // Same reservation the manifests enforce on a declared docs namespace:
+    // docs/team-codebase/ is the legacy codebase output, and recall and the wiki
+    // still read it as such.
+    if (caseFoldKey(options.namespace) === RESERVED_DOCS_DIR) {
+      return {
+        ok: false,
+        message: `"${options.namespace}" cannot be a docs namespace: docs/${RESERVED_DOCS_DIR}/ is reserved `
+          + 'for the legacy codebase output. Pick another name.',
+      };
+    }
+    namespace = options.namespace;
+  }
+  return { ok: true, source: { kind: stats.isDirectory() ? 'dir' : 'file', sourcePath, segment, namespace } };
+}
+
+/**
+ * Where a `--docs` source lands, relative to the team repo root.
+ *
+ * A directory publishes its contents into the top-level directory named by
+ * `--namespace`, else by its own last segment: `--docs docs/tutk` puts tutk's
+ * files in `docs/tutk/`, never in `docs/tutk/tutk/`. A file keeps its name
+ * inside that directory, or becomes `docs/<name>` when no namespace is given.
+ */
+function docsDestination(source: DocsSource): string {
+  if (source.kind === 'file') {
+    return source.namespace === null
+      ? `docs/${source.segment}`
+      : `docs/${source.namespace}/${source.segment}`;
+  }
+  // A directory publishes its contents into the directory itself, so the
+  // segment names that directory rather than appearing inside it.
+  return `docs/${source.namespace ?? source.segment}`;
+}
+
+/**
+ * A docs item carries its whole source tree, so the same text would sit in
+ * every open-PR record and every `state.json` write. One name plus the one path
+ * that decides "is this the same push" is all the bookkeeping needs.
+ */
+function docsItem(source: DocsSource): ResourceItem {
+  return {
+    name: source.segment,
+    type: 'docs',
+    sourcePath: source.sourcePath,
+    relativePath: docsDestination(source),
+    status: 'new',
+  };
+}
+
+/**
+ * `teamai push --docs <path>`: publish a local directory or file into the team
+ * repo's `docs/` tree, then open (or update) its PR. The docs mirror
+ * `pull --force` rebuilds reads the same tree, so nothing else has to know.
+ */
+async function pushDocs(docsPath: string, options: PushOptions, result?: { completed: boolean }): Promise<void> {
+  if (options.skill !== undefined || options.all) {
+    log.error('--docs publishes a directory or file, so it cannot be combined with --skill or --all.');
+    process.exitCode = 2;
+    return;
+  }
+
+  const { localConfig, teamConfig } = await autoDetectInit(undefined, { dryRun: options.dryRun });
+  assertNotReadOnly(localConfig, 'teamai push');
+
+  // Single-repo mode keeps the team's docs inside the business repo
+  // (`.teamai/docs/`), where a PR to the team is a PR to that same repo. Say so
+  // instead of writing into the knowledge worktree this mode swaps in, which
+  // would publish the file from a directory the user never sees.
+  if (localConfig.repo.kind === 'self') {
+    log.error(
+      'Single-repo mode has no separate team repo: its docs live in .teamai/docs/ inside this repository. '
+      + 'Commit and push that file directly instead of running `teamai push --docs`.',
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const resolved = await resolveDocsSource(docsPath, options);
+  if (!resolved.ok) {
+    log.error(resolved.message);
+    process.exitCode = 2;
+    return;
+  }
+  const { source } = resolved;
+  const item = docsItem(source);
+
+  // Same lock as the resource push: the clone this writes into is shared by
+  // every worktree of the scope. Under a dry run it is read, not taken (#866).
+  const syncLock = path.join(getDataHome(localConfig), SYNC_LOCK_FILENAME);
+  if (!(await acquireLock(syncLock, { dryRun: options.dryRun }))) {
+    log.error('Another teamai pull/push is in progress for this project. Re-run once it finishes.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const pullSpin = spinner('Pulling latest changes...').start();
+    try {
+      const repoPath = localConfig.repo.localPath;
+      const git = createGit(repoPath);
+      if (!(await isDedicatedRepoRoot(repoPath))) {
+        pullSpin.fail('Cannot push: team repo path is not a dedicated git root. '
+          + 'Run `teamai init` to re-clone the team repo before pushing.');
+        process.exitCode = 1;
+        return;
+      }
+      const status = await git.status();
+      const unsafeDirtyPaths = collectUnsafeDirtyPaths(status, null);
+      if (unsafeDirtyPaths.length > 0) {
+        pullSpin.fail(
+          'Cannot push: the team repo has uncommitted changes. Commit or stash them first. '
+          + `Paths: ${unsafeDirtyPaths.join(', ')}`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      await resetToCleanMaster(git, repoPath);
+      await pullRepo(repoPath);
+      pullSpin.succeed('Up to date');
+    } catch (e) {
+      // The destination comes from the path the user typed and, at most,
+      // `--namespace` — never from the clone — so a failed refresh does not make
+      // it wrong. Warn and publish onto what is there.
+      pullSpin.warn(`Pull failed: ${(e as Error).message}`);
+    }
+
+    const itemCount = source.kind === 'dir'
+      ? (await listFilesRecursive(source.sourcePath)).length
+      : 1;
+
+    console.log('');
+    console.log('Found 1 resource to push:');
+    console.log('');
+    console.log(`  1. [docs] ${item.name} (new)`);
+    console.log(`       from: ${item.sourcePath}`);
+    console.log(`       to:   ${item.relativePath}`);
+    console.log('');
+
+    if (itemCount === 0) {
+      log.error(`Nothing to push: ${source.sourcePath} has no files.`);
+      process.exitCode = 2;
+      return;
+    }
+
+    if (options.dryRun) {
+      log.info('Dry run — no changes made');
+      return;
+    }
+
+    const state = await loadStateForScope(localConfig);
+    // Only the docs records are settled here. `prunePendingPushes` also drops a
+    // record whose resources the current scan no longer lists, and this run
+    // scanned nothing but the one item — feeding it the docs-only scan would
+    // discard every skill's and rule's open-PR record. A docs PR that merged and
+    // had its branch deleted is what this mode can settle, so that is all it does.
+    const kept: PendingPush[] = [];
+    for (const entry of state.pendingPushes ?? []) {
+      const docsOnly = entry.items.length > 0 && entry.items.every((i) => i.type === 'docs');
+      if (docsOnly && await remoteBranchExists(localConfig.repo.localPath, entry.branch) === false) {
+        log.debug(`Dropping pending push ${entry.branch}: branch gone from origin`);
+        continue;
+      }
+      kept.push(entry);
+    }
+    state.pendingPushes = kept;
+    // An open PR is matched by type, name AND destination. A record for the
+    // same name at another path is a different review: reusing its branch would
+    // force-push this content into it and move a review the user did not name
+    // (#649 review, as for rules and agents).
+    const sameName = findPendingForItem(state.pendingPushes, item);
+    const reuse = sameName.find((entry) => entry.items.some(
+      (recorded) => recorded.type === 'docs' && recorded.name === item.name
+        && recorded.relativePath === item.relativePath,
+    ));
+    for (const entry of sameName) {
+      if (entry === reuse) continue;
+      const recorded = entry.items.find((i) => i.type === 'docs' && i.name === item.name);
+      log.warn(
+        `[docs] ${item.name} is awaiting review at ${recorded?.relativePath} `
+        + `(${entry.prUrl ?? entry.branch}). This push names ${item.relativePath}, so it goes to a separate PR `
+        + 'and that one is left untouched.',
+      );
+    }
+    if (reuse) {
+      log.info(`Updating existing PR instead of creating a new one: ${reuse.prUrl ?? reuse.branch}`);
+    }
+
+    const outcome = await pushGroup({
+      group: { items: [item], reuse },
+      teamConfig,
+      localConfig,
+      pushState: state,
+      includeTeamConfig: false,
+      branch: options.branch,
+    });
+    // The record of the PR this run opened (or updated) has to survive, or the
+    // next run would open a duplicate. `teamai status` reads `lastPush`, set the
+    // way the resource path sets it: on any run that got this far except a
+    // failure, so a PR-creation failure still records the attempt.
+    if (outcome !== 'failed') state.lastPush = new Date().toISOString();
+    try {
+      await saveStateForScope(state, localConfig);
+    } catch (e) {
+      log.error(
+        `Could not record the push PR (${(e as Error).message}). The branch is on the remote, so a retry `
+        + 'would open a second PR for it. Check that the teamai state file is writable.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (outcome === 'failed') {
+      process.exitCode = 1;
+      return;
+    }
+    if (outcome === 'pushed' && result) result.completed = true;
+  } finally {
+    await releaseLock(syncLock);
   }
 }

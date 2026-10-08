@@ -44,7 +44,12 @@ export async function prunePendingPushes(
   const entries = pending ?? [];
 
   for (const entry of entries) {
-    const stillScanned = entry.items.some((i) => scannedKeys.has(itemKey(i.type, i.name)));
+    // Docs are named on the command line, never scanned, so this scan says
+    // nothing about them: an entry of theirs is only settled by its branch
+    // (`teamai push --docs` does the same for its own records). Dropping it here
+    // would let the next plain push open a duplicate PR for it.
+    const docsOnly = entry.items.length > 0 && entry.items.every((i) => i.type === 'docs');
+    const stillScanned = docsOnly || entry.items.some((i) => scannedKeys.has(itemKey(i.type, i.name)));
     if (!stillScanned) {
       log.debug(`Dropping pending push ${entry.branch}: resources no longer pending`);
       continue;
